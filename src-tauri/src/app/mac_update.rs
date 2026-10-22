@@ -1007,10 +1007,14 @@ where
         let mut entry = archive
             .by_index(index)
             .map_err(|e| AppError::Engine(format!("读取 ZIP 条目失败: {e}")))?;
+        let entry_name = entry
+            .name()
+            .map_err(|e| AppError::Engine(format!("读取 ZIP 条目名称失败: {e}")))?
+            .into_owned();
         let Some(enclosed) = entry.enclosed_name() else {
             return Err(AppError::Engine(format!(
                 "ZIP 包含不安全路径：{}",
-                entry.name()
+                entry_name
             )));
         };
         let declared_size = entry.size();
@@ -1020,7 +1024,7 @@ where
         if declared_size > remaining {
             return Err(AppError::Engine(format!(
                 "ZIP 声明解压后大小超出允许范围：{}",
-                entry.name()
+                entry_name
             )));
         }
 
@@ -1028,7 +1032,7 @@ where
             if declared_size == 0 || declared_size > MAX_ZIP_SYMLINK_TARGET_BYTES {
                 return Err(AppError::Engine(format!(
                     "ZIP 包含无效符号链接：{}",
-                    entry.name()
+                    entry_name
                 )));
             }
             let mut target = Vec::new();
@@ -1040,11 +1044,11 @@ where
             if actual == 0 || actual > MAX_ZIP_SYMLINK_TARGET_BYTES {
                 return Err(AppError::Engine(format!(
                     "ZIP 符号链接实际展开大小超出允许范围：{}",
-                    entry.name()
+                    entry_name
                 )));
             }
             let target = String::from_utf8(target).map_err(|_| {
-                AppError::Engine(format!("ZIP 符号链接目标不是 UTF-8：{}", entry.name()))
+                AppError::Engine(format!("ZIP 符号链接目标不是 UTF-8：{}", entry_name))
             })?;
             validate_zip_symlink_target(&enclosed, &target)?;
             actual
@@ -1058,13 +1062,13 @@ where
         if actual_size > remaining {
             return Err(AppError::Engine(format!(
                 "ZIP 实际解压后大小超出允许范围：{}",
-                entry.name()
+                entry_name
             )));
         }
         if actual_size != declared_size {
             return Err(AppError::Engine(format!(
                 "ZIP 条目声明大小与实际展开大小不一致：{}（{} != {}），拒绝安装",
-                entry.name(),
+                entry_name,
                 declared_size,
                 actual_size
             )));
