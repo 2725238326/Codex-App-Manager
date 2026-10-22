@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn download_with_progress_reports_final_size() {
+    fn download_rejects_file_urls() {
         if hidden_command(curl_exe())
             .arg("--version")
             .output()
@@ -618,29 +618,22 @@ mod tests {
             return;
         }
 
-        let root =
-            std::env::temp_dir().join(format!("codex-win-engine-progress-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = std::env::temp_dir().join(format!(
+            "codex-win-engine-file-url-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("source.bin");
         let dest = root.join("dest.bin");
-        let bytes = vec![0x4d; 1024 * 1024];
-        std::fs::write(&source, &bytes).unwrap();
+        std::fs::write(&source, b"local file must not be downloaded").unwrap();
 
-        let seen = std::sync::Mutex::new(Vec::new());
-        let result = download_to_with_progress(&file_url(&source), &dest, &|downloaded| {
-            seen.lock().unwrap().push(downloaded);
-        });
-        if let Err(EngineError::Io(message)) = &result {
-            if message.contains("Protocol \"file\" disabled") {
-                let _ = std::fs::remove_dir_all(&root);
-                return;
-            }
-        }
-        result.unwrap();
-
-        assert_eq!(std::fs::read(&dest).unwrap(), bytes);
-        assert!(seen.lock().unwrap().contains(&(1024 * 1024)));
-        let _ = std::fs::remove_dir_all(&root);
+        // Production downloads and redirects are HTTPS-only. A file:// fixture
+        // cannot exercise successful transfer progress through this path.
+        let error = download_to_with_progress(&file_url(&source), &dest, &|_| {})
+            .unwrap_err();
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(message.contains("protocol") && message.contains("file"), "{error}");
+        assert!(!dest.exists(), "a rejected URL must not create the destination");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
