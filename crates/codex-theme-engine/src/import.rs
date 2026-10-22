@@ -80,11 +80,14 @@ fn extract_and_place(
         let entry = archive
             .by_index(index)
             .map_err(|e| err(format!("读取压缩包条目失败: {e}")))?;
+        let entry_name = entry
+            .name()
+            .map_err(|e| err(format!("读取压缩包条目名称失败: {e}")))?;
         let Some(relative) = entry
             .enclosed_name()
             .and_then(|p| safe_entry_path(p.to_string_lossy().as_ref()))
         else {
-            return Err(err(format!("主题包含非法路径条目: {}", entry.name())));
+            return Err(err(format!("主题包含非法路径条目: {entry_name}")));
         };
         if entry.is_dir() {
             std::fs::create_dir_all(staging.join(&relative))
@@ -219,6 +222,34 @@ mod tests {
         write_zip(&hollow, &[("readme.md", b"hi" as &[u8])]);
         let error = import_codexskin(&hollow, &root).unwrap_err().to_string();
         assert!(error.contains("theme.json"), "{error}");
+    }
+
+    #[test]
+    fn imports_legacy_cp437_entry_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("themes");
+        let skin = tmp.path().join("cp437-name.codexskin");
+        let mut entries = minimal_entries("cp437-name");
+        entries.push(("cafe.bin".to_string(), b"legacy filename".to_vec()));
+        let refs: Vec<(&str, &[u8])> =
+            entries.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        write_zip(&skin, &refs);
+        let mut bytes = std::fs::read(&skin).unwrap();
+        let name = b"cafe.bin";
+        let mut replaced = 0;
+        for index in 0..=bytes.len() - name.len() {
+            if bytes[index..index + name.len()] == *name {
+                bytes[index + 3] = 0x82; // CP437 encodes é as one byte.
+                replaced += 1;
+            }
+        }
+        assert_eq!(replaced, 2, "update local and central directory names");
+        std::fs::write(&skin, bytes).unwrap();
+        assert_eq!(import_codexskin(&skin, &root).unwrap().id, "cp437-name");
+        assert_eq!(
+            std::fs::read(root.join("cp437-name/café.bin")).unwrap(),
+            b"legacy filename"
+        );
     }
 
     #[test]

@@ -425,7 +425,10 @@ fn extract_msix(msix_path: &Path, dest: &Path) -> Result<String, EngineError> {
         let mut file = zip
             .by_index(idx)
             .map_err(|e| EngineError::Msix(format!("read zip entry {idx}: {e}")))?;
-        let zip_name = file.name().to_string();
+        let zip_name = file
+            .name()
+            .map_err(|e| EngineError::Msix(format!("decode zip entry {idx} name: {e}")))?
+            .into_owned();
         let (decoded_components, was_percent_encoded) = decode_zip_entry_path(&zip_name)?;
         if file.is_dir() {
             continue;
@@ -2547,6 +2550,37 @@ mod tests {
             zip.write_all(data).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn extracts_legacy_cp437_zip_entry_names() {
+        let root = temp_test_dir("cp437-zip-entry-name");
+        let msix = root.join("codex.msix");
+        let extracted = root.join("extracted");
+        fs::create_dir_all(&extracted).unwrap();
+        let payload = b"legacy filename";
+        write_block_mapped_msix(
+            &msix,
+            &[("café.bin", payload.len() as u64)],
+            &[("cafe.bin", payload)],
+        );
+        let mut bytes = fs::read(&msix).unwrap();
+        let name = b"cafe.bin";
+        let mut replaced = 0;
+        for index in 0..=bytes.len() - name.len() {
+            if bytes[index..index + name.len()] == *name {
+                bytes[index + 3] = 0x82; // CP437 encodes é as one byte.
+                replaced += 1;
+            }
+        }
+        assert_eq!(replaced, 2, "update local and central directory names");
+        fs::write(&msix, bytes).unwrap();
+        extract_msix(&msix, &extracted).unwrap();
+        assert_eq!(
+            fs::read(extracted.join("café.bin")).unwrap(),
+            b"legacy filename"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
