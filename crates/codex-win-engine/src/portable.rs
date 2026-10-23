@@ -425,8 +425,7 @@ fn extract_msix(msix_path: &Path, dest: &Path) -> Result<String, EngineError> {
         let mut file = zip
             .by_index(idx)
             .map_err(|e| EngineError::Msix(format!("read zip entry {idx}: {e}")))?;
-        let zip_name = file
-            .name()
+        let zip_name = codex_archive::entry_name(&file)
             .map_err(|e| EngineError::Msix(format!("decode zip entry {idx} name: {e}")))?
             .into_owned();
         let (decoded_components, was_percent_encoded) = decode_zip_entry_path(&zip_name)?;
@@ -2853,6 +2852,103 @@ mod tests {
             b"legacy filename"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extracts_cp437_names_that_are_also_valid_utf8() {
+        use crate::zip_test::{archive, Entry};
+
+        let root = temp_test_dir("ambiguous-cp437");
+        let msix = root.join("codex.msix");
+        let extracted = root.join("extracted");
+        fs::create_dir_all(&extracted).unwrap();
+        let block_map = r#"<BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap">
+            <File Name="app\├⌐.bin" Size="7" LfhSize="30" />
+            </BlockMap>"#;
+        let bytes = archive(&[
+            Entry::new(b"AppxBlockMap.xml", block_map.as_bytes()),
+            Entry::new(b"AppxManifest.xml", b"<Package />"),
+            Entry::new(b"app/\xc3\xa9.bin", b"payload"),
+        ]);
+        fs::write(&msix, bytes).unwrap();
+        extract_msix(&msix, &extracted).unwrap();
+        assert_eq!(fs::read(extracted.join("app/├⌐.bin")).unwrap(), b"payload");
+        assert!(!extracted.join("app/é.bin").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn installs_cp437_utf8_and_unicode_path_block_map_names() {
+        use crate::zip_test::{archive, unicode_path_extra, Entry};
+
+        let raw = b"app/\xc3\xa9.bin";
+        let unicode = unicode_path_extra(raw, "app/资源.bin".as_bytes(), true);
+        let bad_crc = unicode_path_extra(raw, "app/资源.bin".as_bytes(), false);
+        for (flags, extra, expected) in [
+            (0, &[][..], "├⌐.bin"),
+            (1 << 11, &[][..], "é.bin"),
+            (0, unicode.as_slice(), "资源.bin"),
+            (0, bad_crc.as_slice(), "├⌐.bin"),
+        ] {
+            let root = temp_test_dir("encoded-msix-install");
+            let msix = root.join("codex.msix");
+            let installed = root.join("Codex");
+            let block_map = format!(
+                r#"<BlockMap xmlns="http://schemas.microsoft.com/appx/2010/blockmap">
+                <File Name="app\{expected}" Size="7" LfhSize="30" />
+                </BlockMap>"#
+            );
+            let manifest = br#"<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+                <Identity Name="OpenAI.Codex" Publisher="CN=OpenAI OpCo, LLC" Version="26.803.10989.0" ProcessorArchitecture="x64" />
+                <Applications><Application Id="App" Executable="app/ChatGPT.exe" EntryPoint="Windows.FullTrustApplication" /></Applications>
+                </Package>"#;
+            let mut resource = Entry::new(raw, b"payload");
+            resource.flags = flags;
+            resource.extra = extra;
+            fs::write(
+                &msix,
+                archive(&[
+                    Entry::new(b"AppxBlockMap.xml", block_map.as_bytes()),
+                    Entry::new(b"AppxManifest.xml", manifest),
+                    Entry::new(b"app/ChatGPT.exe", b"fake entry exe"),
+                    resource,
+                ]),
+            )
+            .unwrap();
+            let report = install_portable_from_msix_inner(&msix, &installed, false, false).unwrap();
+            assert!(report.success);
+            assert_eq!(
+                fs::read(installed.join("app").join(expected)).unwrap(),
+                b"payload"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_unicode_path_during_msix_extraction() {
+        use crate::zip_test::{archive, unicode_path_extra, Entry};
+
+        let raw = b"app/safe.bin";
+        for unsafe_name in [
+            "../escape.bin", r"..\escape.bin", "/absolute", r"C:\escape", "nul\0path",
+        ] {
+            let root = temp_test_dir("unsafe-unicode-msix");
+            let msix = root.join("codex.msix");
+            let extracted = root.join("extracted");
+            fs::create_dir_all(&extracted).unwrap();
+            let extra = unicode_path_extra(raw, unsafe_name.as_bytes(), true);
+            let mut entry = Entry::new(raw, b"payload");
+            entry.extra = &extra;
+            fs::write(
+                &msix,
+                archive(&[Entry::new(b"AppxManifest.xml", b"<Package />"), entry]),
+            )
+            .unwrap();
+            assert!(extract_msix(&msix, &extracted).is_err(), "{unsafe_name:?}");
+            assert!(!root.join("escape.bin").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

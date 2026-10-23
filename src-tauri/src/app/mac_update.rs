@@ -1007,11 +1007,10 @@ where
         let mut entry = archive
             .by_index(index)
             .map_err(|e| AppError::Engine(format!("读取 ZIP 条目失败: {e}")))?;
-        let entry_name = entry
-            .name()
+        let entry_name = codex_archive::entry_name(&entry)
             .map_err(|e| AppError::Engine(format!("读取 ZIP 条目名称失败: {e}")))?
             .into_owned();
-        let Some(enclosed) = entry.enclosed_name() else {
+        let Some(enclosed) = codex_archive::enclosed_path(&entry_name) else {
             return Err(AppError::Engine(format!(
                 "ZIP 包含不安全路径：{}",
                 entry_name
@@ -3255,6 +3254,79 @@ mod disk_preflight_tests {
         assert!(err.to_string().contains("磁盘可用空间不足"));
         assert!(require_zip_expansion_space(expanded, work, |_| Ok(Some(need))).is_ok());
         assert!(require_zip_expansion_space(expanded, work, |_| Ok(None)).is_ok());
+    }
+
+    #[test]
+    fn zip_preflight_validates_the_decoded_unicode_path() {
+        use crate::zip_test::{archive, unicode_path_extra, Entry};
+
+        let root = std::env::temp_dir().join(format!("cam-encoded-zip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("Codex.zip");
+        let raw = b"Codex.app/Contents/\xc3\xa9.bin";
+        let unicode = unicode_path_extra(raw, "Codex.app/Contents/资源.bin".as_bytes(), true);
+        let bad_crc = unicode_path_extra(raw, b"../escape.bin", false);
+        for (flags, extra) in [
+            (0, &[][..]),
+            (1 << 11, &[][..]),
+            (0, unicode.as_slice()),
+            (0, bad_crc.as_slice()),
+        ] {
+            let mut entry = Entry::new(raw, b"payload");
+            entry.flags = flags;
+            entry.extra = extra;
+            std::fs::write(&package, archive(&[entry])).unwrap();
+            preflight_app_zip_with_available(&package, &root, |_| Ok(Some(u64::MAX))).unwrap();
+        }
+
+        for unsafe_name in [
+            "../escape.bin", r"..\escape.bin", "/absolute", r"C:\escape", "nul\0path",
+        ] {
+            let extra = unicode_path_extra(raw, unsafe_name.as_bytes(), true);
+            let mut entry = Entry::new(raw, b"payload");
+            entry.extra = &extra;
+            std::fs::write(&package, archive(&[entry])).unwrap();
+            let error = preflight_app_zip_with_available(&package, &root, |_| Ok(Some(u64::MAX)))
+                .unwrap_err();
+            assert!(error.to_string().contains("不安全路径"), "{unsafe_name:?}: {error}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_preflight_rejects_invalid_flagged_utf8() {
+        use crate::zip_test::{archive, Entry};
+
+        let root = std::env::temp_dir().join(format!("cam-invalid-zip-name-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("Codex.zip");
+        let mut entry = Entry::new(b"Codex.app/Contents/caf\x82.bin", b"payload");
+        entry.flags = 1 << 11;
+        std::fs::write(&package, archive(&[entry])).unwrap();
+        let error = preflight_app_zip_with_available(&package, &root, |_| Ok(Some(u64::MAX)))
+            .unwrap_err();
+        assert!(error.to_string().contains("名称失败"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_preflight_uses_cp437_name_in_symlink_checks() {
+        use crate::zip_test::{archive, Entry};
+
+        let root = std::env::temp_dir().join(format!("cam-cp437-symlink-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let package = root.join("Codex.zip");
+        let mut entry = Entry::new(b"\xc3\xa9.app", b"/Applications/Codex.app");
+        entry.unix_mode = 0o120777;
+        std::fs::write(&package, archive(&[entry])).unwrap();
+        let error = preflight_app_zip_with_available(&package, &root, |_| Ok(Some(u64::MAX)))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("物理 .app") && message.contains("├⌐.app"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

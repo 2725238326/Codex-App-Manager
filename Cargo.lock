@@ -537,6 +537,7 @@ name = "codex-app-manager"
 version = "0.5.16"
 dependencies = [
  "base64 0.23.1",
+ "codex-archive",
  "codex-mac-engine",
  "codex-theme-engine",
  "codex-win-engine",
@@ -567,6 +568,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-archive"
+version = "0.1.0"
+dependencies = [
+ "zip",
+]
+
+[[package]]
 name = "codex-mac-engine"
 version = "0.1.0"
 dependencies = [
@@ -586,6 +594,7 @@ name = "codex-theme-engine"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "codex-archive",
  "futures-util",
  "log",
  "serde",
@@ -604,6 +613,7 @@ dependencies = [
 name = "codex-win-engine"
 version = "0.1.0"
 dependencies = [
+ "codex-archive",
  "libc",
  "log",
  "roxmltree",
